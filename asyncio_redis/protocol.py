@@ -42,6 +42,7 @@ from .replies import (
         ZRangeReply,
 )
 
+from collections import defaultdict
 
 from .cursors import Cursor, SetCursor, DictCursor, ZCursor
 
@@ -992,11 +993,19 @@ class RedisProtocol(asyncio.Protocol, metaclass=_RedisProtocolMeta):
 
         if type == b'message':
             channel, value = yield from multibulk_reply._read(count=2)
-            yield from self._subscription._messages_queue.put(PubSubReply(channel, value))
+            if not getattr(self,'use_callbacks', False):
+                yield from self._subscription._messages_queue.put(PubSubReply(channel, value))
+            else:
+                for callback, kwargs in self._subscription.callbacks[channel].items():
+                    yield from callback(channel, value, **kwargs)
 
         elif type == b'pmessage':
             pattern, channel, value = yield from multibulk_reply._read(count=3)
-            yield from self._subscription._messages_queue.put(PubSubReply(channel, value, pattern=pattern))
+            if not getattr(self,'use_callbacks', False):
+                yield from self._subscription._messages_queue.put(PubSubReply(channel, value, pattern=pattern))
+            else:
+                for callback, kwargs  in self._subscription.pcallbacks[channel].items():
+                    yield from callback(channel, value, **kwargs)
 
         # We can safely ignore 'subscribe'/'unsubscribe' replies at this point,
         # they don't contain anything really useful.
@@ -2357,23 +2366,66 @@ class Subscription:
     """
     def __init__(self, protocol):
         self.protocol = protocol
-        self._messages_queue = Queue(loop=protocol._loop) # Pubsub queue
 
+        if not getattr(self.protocol,'use_callbacks', False):
+            self._messages_queue = Queue(loop=protocol._loop) # Pubsub queue
+            self.subscribe = self._q_subscribe
+            self.unsubscribe = self._q_unsubscribe
+            self.psubscribe = self._q_psubscribe
+            self.punsubscribe = self._q_punsubscribe
+        else:
+            self.callbacks = defaultdict(dict)
+            self.pcallbacks = defaultdict(dict)
+            self.subscribe = self._cb_subscribe
+            self.unsubscribe = self._cb_unsubscribe
+            self.psubscribe = self._cb_psubscribe
+            self.punsubscribe = self._cb_punsubscribe
+
+
+
+    # Queue based methods
     @wraps(RedisProtocol._subscribe)
-    def subscribe(self, channels):
+    def _q_subscribe(self, channels):
         return self.protocol._subscribe(self, channels)
 
-    @wraps(RedisProtocol._unsubscribe)
-    def unsubscribe(self, channels):
-        return self.protocol._unsubscribe(self, channels)
-
     @wraps(RedisProtocol._psubscribe)
-    def psubscribe(self, patterns):
+    def _q_psubscribe(self, patterns):
         return self.protocol._psubscribe(self, patterns)
 
+    @wraps(RedisProtocol._unsubscribe)
+    def _q_unsubscribe(self, channels):
+        return self.protocol._unsubscribe(self, channels)
+
     @wraps(RedisProtocol._punsubscribe)
-    def punsubscribe(self, patterns):
+    def _q_punsubscribe(self, patterns):
         return self.protocol._punsubscribe(self, patterns)
+
+
+    # Callbacks based methods
+    @wraps(RedisProtocol._subscribe)
+    def _cb_subscribe(self, channels, callback, **kwargs):
+        for channel in channels:
+            self.callbacks[channel][callback] = kwargs
+        return self.protocol._subscribe(self, channels)
+
+    @wraps(RedisProtocol._psubscribe)
+    def _cb_psubscribe(self, patterns, callback, **kwargs):
+        for pattern in patterns:
+            self.pcallbacks[pattern][callback] = kwargs
+        return self.protocol._psubscribe(self, patterns)
+
+    @wraps(RedisProtocol._unsubscribe)
+    def _cb_unsubscribe(self, channels, callback):
+        for channel in channels:
+            del self.callbacks[channel][callback]
+        return self.protocol._unsubscribe(self, channels)
+
+    @wraps(RedisProtocol._punsubscribe)
+    def _cb_punsubscribe(self, patterns, callback):
+        for pattern in patterns:
+            del self.pcallbacks[pattern][callback]
+        return self.protocol._punsubscribe(self, patterns)
+
 
     @asyncio.coroutine
     def next_published(self):
@@ -2383,6 +2435,8 @@ class Subscription:
 
         :returns: instance of :class:`PubSubReply <asyncio_redis.replies.PubSubReply>`
         """
+        if getattr(self.protocol,'use_callbacks', False):
+            raise TypeError('Cannot call next_published on a connection in callback mode')
         return (yield from self._messages_queue.get())
 
 

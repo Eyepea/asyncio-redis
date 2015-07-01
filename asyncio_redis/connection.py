@@ -21,7 +21,7 @@ class Connection:
     @classmethod
     @asyncio.coroutine
     def create(cls, host='localhost', port=6379, *, password=None, db=0,
-               encoder=None, auto_reconnect=True, loop=None, protocol_class=RedisProtocol):
+               encoder=None, auto_reconnect=True, loop=None, protocol_class=RedisProtocol, use_callbacks=False):
         """
         :param host: Address, either host or unix domain socket path
         :type host: str
@@ -38,6 +38,7 @@ class Connection:
         :param loop: (optional) asyncio event loop.
         :type protocol_class: :class:`~asyncio_redis.RedisProtocol`
         :param protocol_class: (optional) redis protocol implementation
+        :use_callbacks: (optional) use callbacks-based subscriptions, if not: queue-based
         """
         assert port >= 0, "Unexpected port value: %r" % (port, )
         connection = cls()
@@ -59,6 +60,8 @@ class Connection:
         # Create protocol instance
         connection.protocol = protocol_class(password=password, db=db, encoder=encoder,
                         connection_lost_callback=connection_lost, loop=connection._loop)
+
+        connection.protocol.use_callbacks = use_callbacks
 
         # Connect
         yield from connection._reconnect()
