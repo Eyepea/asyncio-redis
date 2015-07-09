@@ -1984,6 +1984,20 @@ class RedisProtocol(asyncio.Protocol, metaclass=_RedisProtocolMeta):
         return self._query(b'client', b'kill', address.encode('utf-8'))
 
     # LUA scripting
+    @_query_command
+    def eval(self,  code:str,
+                    keys:(ListOf(NativeType), NoneType)=None,
+                    args:(ListOf(NativeType), NoneType)=None) -> EvalScriptReply:
+        if not keys: keys = []
+        if not args: args = []
+        try:
+            result = yield from self._query(b'eval',
+                                            code.encode('ascii'),
+                                            self._encode_int(len(keys)),
+                                            *map(self.encode_from_native, keys + args))
+            return result
+        except ErrorReply:
+            raise ScriptKilledError
 
     @_command
     def register_script(self, script:str) -> 'Script':
